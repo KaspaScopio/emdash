@@ -10,6 +10,7 @@ import type { Kysely } from "kysely";
 
 import type { ContentFieldFilters } from "../content-list-query.js";
 import type {
+	EmDashRuntime,
 	PluginEditorExtensionDispatch,
 	ResolvedPluginEditorExtension,
 } from "../emdash-runtime.js";
@@ -322,6 +323,9 @@ export interface EmDashHandlers {
 			_rev?: string;
 		}>
 	>;
+
+	handleContentCreateOnce?: EmDashRuntime["handleContentCreateOnce"];
+	deliverContentCreateEffects?: EmDashRuntime["deliverContentCreateEffects"];
 
 	handleContentCreate: (
 		collection: string,
