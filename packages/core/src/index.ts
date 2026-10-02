@@ -116,6 +116,8 @@ export type {
 	ApiContext,
 } from "./api/index.js";
 
+export type { ContentCreateOperation, ContentCreateEffect } from "./content/atomic-create.js";
+
 // Content converters (Portable Text <-> ProseMirror)
 export {
 	portableTextIdentityExtensions,

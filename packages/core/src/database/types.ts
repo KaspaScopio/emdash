@@ -754,9 +754,25 @@ export interface TransferApprovalTable {
 	consumed_at: string | null;
 }
 
+export interface ContentOperationTable {
+	id: string;
+	binding: string;
+	result: string | null;
+	created_at: Generated<string>;
+}
+export interface ContentCreateEffectTable {
+	id: string;
+	collection: string;
+	entry_id: string;
+	created_at: Generated<string>;
+	completed_at: string | null;
+}
+
 // Database schema
 // Note: ec_* content tables are dynamic and not part of this type
 export interface Database {
+	_emdash_content_operations: ContentOperationTable;
+	_emdash_content_create_effects: ContentCreateEffectTable;
 	revisions: RevisionTable;
 	_emdash_revision_prune_queue: RevisionPruneQueueTable;
 	taxonomies: TaxonomyTable;

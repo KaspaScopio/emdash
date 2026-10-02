@@ -40,6 +40,7 @@ import {
 } from "./api/handlers/staged-references.js";
 import { validateRev } from "./api/rev.js";
 import { getSiteBaseUrl } from "./api/site-url.js";
+import type { ApiResult, ContentResponse } from "./api/types.js";
 import type {
 	EmDashConfig,
 	PluginAdminPage,
@@ -50,6 +51,8 @@ import { getAuthMode } from "./auth/mode.js";
 import { getTrustedProxyHeaders } from "./auth/trusted-proxy.js";
 import { lookupContentAuthor, sendCommentNotification } from "./comments/notifications.js";
 import type { ContentFieldFilters } from "./content-list-query.js";
+import { runContentCreateOperation, deliverContentCreateEffects } from "./content/atomic-create.js";
+import type { ContentCreateOperation, ContentCreateEffect } from "./content/atomic-create.js";
 import { keepKnownFields, staleStoredKeys } from "./content/known-fields.js";
 import { isSqlite } from "./database/dialect-helpers.js";
 import { kyselyLogOption } from "./database/instrumentation.js";
@@ -286,7 +289,7 @@ import { PluginStateRepository } from "./plugins/state.js";
 import { syncDeclaredStorageIndexes } from "./plugins/storage-indexes.js";
 import { getRegistryConfigInput, resolveManifestRegistryConfig } from "./registry/config.js";
 import { requestCached } from "./request-cache.js";
-import { getRequestContext } from "./request-context.js";
+import { getRequestContext, runWithContext } from "./request-context.js";
 import { publishDueContent, type PublishedRef } from "./scheduled-publish.js";
 import { FTSManager } from "./search/fts-manager.js";
 import { invalidateSiteSettingsCache } from "./settings/index.js";
@@ -547,7 +550,7 @@ function beforeSaveFailure(error: unknown) {
 				error: {
 					code: ErrorCode.SAVE_REJECTED,
 					message: error.message,
-					details: sandbox,
+					details: { ...sandbox },
 				},
 			};
 		}
@@ -3320,6 +3323,66 @@ export class EmDashRuntime {
 		}
 	}
 
+	async handleContentCreateOnce(
+		collection: string,
+		body: Parameters<EmDashRuntime["handleContentCreate"]>[1],
+		operation: ContentCreateOperation,
+	): Promise<ApiResult<ContentResponse>> {
+		if (this.config.database?.type !== "sqlite" || !isSqlite(this.db) || this.db.isTransaction)
+			return {
+				success: false,
+				error: {
+					code: ErrorCode.NOT_SUPPORTED,
+					message: "Atomic content creation requires a standalone SQLite transaction",
+				},
+			};
+		if (this.hooks.hasHooks("content:beforeSave") || this.hooks.hasHooks("content:afterSave"))
+			return {
+				success: false,
+				error: {
+					code: ErrorCode.NOT_SUPPORTED,
+					message: "Atomic content creation does not support active save hooks",
+				},
+			};
+		let capturedBody: typeof body;
+		let capturedOperation: ContentCreateOperation;
+		try {
+			capturedBody = structuredClone(body);
+			capturedOperation = structuredClone(operation);
+		} catch {
+			return {
+				success: false,
+				error: {
+					code: ErrorCode.INVALID_INPUT,
+					message: "Content operation requires cloneable input",
+				},
+			};
+		}
+		if (capturedBody.actor && capturedBody.actor.id !== capturedOperation.actorId)
+			return {
+				success: false,
+				error: {
+					code: ErrorCode.FORBIDDEN,
+					message: "Content operation actor does not match the request actor",
+				},
+			};
+		const context = getRequestContext();
+		return runContentCreateOperation(this.db, capturedOperation, collection, capturedBody, (trx) =>
+			runWithContext({ editMode: false, ...context, db: trx }, () =>
+				this.createContent(collection, capturedBody, { skipSaveHooks: true }, true),
+			),
+		);
+	}
+
+	async deliverContentCreateEffects(
+		deliver: (effect: ContentCreateEffect) => Promise<void>,
+		limit = 50,
+	): Promise<number> {
+		if (this.config.database?.type !== "sqlite")
+			throw new Error("Content operation effects require SQLite");
+		return deliverContentCreateEffects(this.db, deliver, limit);
+	}
+
 	async handleContentCreate(
 		collection: string,
 		body: {
@@ -3338,7 +3401,16 @@ export class EmDashRuntime {
 			replaceBlocks?: boolean;
 		},
 		options: { skipSaveHooks?: boolean; excludeAfterSavePluginId?: string } = {},
-	) {
+	): Promise<ApiResult<ContentResponse>> {
+		return this.createContent(collection, body, options);
+	}
+
+	private async createContent(
+		collection: string,
+		body: Parameters<EmDashRuntime["handleContentCreate"]>[1],
+		options: NonNullable<Parameters<EmDashRuntime["handleContentCreate"]>[2]>,
+		deferEffects = false,
+	): Promise<ApiResult<ContentResponse>> {
 		const actor = body.actor ? { ...body.actor } : undefined;
 		let locale: string;
 		try {
@@ -3495,12 +3567,12 @@ export class EmDashRuntime {
 			authorId: body.authorId,
 			bylines: body.bylines,
 		});
-		if (result.success && result.data) {
+		if (!deferEffects && result.success && result.data) {
 			await this.refreshContentUsageAfterSuccessfulWrite(collection, [result.data.item.id]);
 		}
 
 		// Run afterSave hooks (fire-and-forget)
-		if (!options.skipSaveHooks && result.success && result.data) {
+		if (!deferEffects && !options.skipSaveHooks && result.success && result.data) {
 			this.runAfterSaveHooks(
 				contentItemToRecord(result.data.item),
 				collection,
