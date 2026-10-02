@@ -84,6 +84,38 @@ interface ImageRemotePattern {
 }
 
 /**
+ * Resolve the effective public site URL at build/config time.
+ *
+ * Most EmDash code resolves `siteUrl` at runtime via `getPublicOrigin()`, which
+ * falls back to `EMDASH_SITE_URL` / `SITE_URL` so container deployments can set
+ * the domain after build. Astro's `image.remotePatterns`, however, are baked
+ * into the build, so we read the same env vars here as a fallback when no
+ * `siteUrl` is configured.
+ *
+ * Returns the configured site origin, or `undefined` when neither config nor
+ * environment provides a valid http(s) origin.
+ *
+ * @internal Exported for unit testing.
+ */
+export function resolveBuildTimeSiteUrl(configuredSiteUrl: string | undefined): string | undefined {
+	if (configuredSiteUrl) return configuredSiteUrl;
+
+	const value =
+		(typeof process !== "undefined" && process.env?.EMDASH_SITE_URL) ||
+		(typeof process !== "undefined" && process.env?.SITE_URL) ||
+		"";
+	if (!value) return undefined;
+
+	try {
+		const parsed = new URL(value);
+		if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+		return parsed.origin;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Build `image.remotePatterns` entries so Astro will optimize EmDash media.
  *
  * Astro's image services only build a transform URL for sources allowed via
@@ -95,12 +127,14 @@ interface ImageRemotePattern {
  *     (`/_emdash/api/media/file/**`), so same-origin proxied media is optimized.
  *     The components absolutize the media URL against this origin; EmDash's
  *     wrapped image endpoint then serves the bytes from storage (so the absolute
- *     URL is never fetched). Only registered when `siteUrl` is known at build.
+ *     URL is never fetched). Registered when `siteUrl` is known at build, or
+ *     when the `EMDASH_SITE_URL` / `SITE_URL` environment variable supplies it.
  *  3. In `astro dev` the dev-server origin isn't known at build time, so we
  *     register a host-agnostic pattern scoped to the media route. Dev-only.
  *
  * Returns an empty array when no source is statically known (production build,
- * local storage, no `siteUrl`), in which case media renders as a plain `<img>`.
+ * local storage, no `siteUrl` or `EMDASH_SITE_URL` / `SITE_URL`), in which case
+ * media renders as a plain `<img>`.
  *
  * @internal Exported for unit testing.
  */
@@ -461,6 +495,8 @@ export function emdash(config: EmDashConfig = {}): AstroIntegration {
 	// Env-var fallback (EMDASH_SITE_URL / SITE_URL) is handled at runtime by
 	// getPublicOrigin() in api/public-url.ts — NOT here — so Docker images built
 	// without a domain can pick it up at container start via process.env.
+	// image.remotePatterns are an exception: they are baked at build time, so
+	// resolveBuildTimeSiteUrl() reads the same env vars as a fallback.
 	if (resolvedConfig.siteUrl) {
 		const raw = resolvedConfig.siteUrl;
 		try {
@@ -639,9 +675,12 @@ export function emdash(config: EmDashConfig = {}): AstroIntegration {
 				// Authorize media sources so Astro's image service builds transform
 				// URLs for them (it won't optimize an un-allowed source). `updateConfig`
 				// merges arrays, so user-configured remotePatterns are preserved.
+				// Resolve siteUrl from config first, then build-time env vars, because
+				// image.remotePatterns are baked at build and cannot use the runtime
+				// fallback from getPublicOrigin().
 				const imageRemotePatterns = buildImageRemotePatterns(
 					resolvedConfig.storage,
-					resolvedConfig.siteUrl,
+					resolveBuildTimeSiteUrl(resolvedConfig.siteUrl),
 					command,
 				);
 
